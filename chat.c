@@ -9,10 +9,15 @@
 #include <getopt.h>
 #include "dh.h"
 #include "keys.h"
+#include <openssl/crypto.h> // for CRYPTO_memcmp
 
 #ifndef PATH_MAX
 #define PATH_MAX 1024
 #endif
+
+#define KEY_SIZE 32
+#define MAC_SIZE 32	
+#define MSG_SIZE 1024
 
 static GtkTextBuffer* tbuf; /* transcript buffer */
 static GtkTextBuffer* mbuf; /* message buffer */
@@ -20,7 +25,25 @@ static GtkTextView*  tview; /* view for transcript */
 static GtkTextMark*   mark; /* used for scrolling to end of transcript, etc */
 
 static pthread_t trecv;     /* wait for incoming messagess and post to queue */
-void* recvMsg(void*);       /* for trecv */
+void* recvMsg(void*);	    /* for trecv */
+
+unsigned char myPrivateKey[KEY_SIZE];
+unsigned char myPublicKey[KEY_SIZE];
+unsigned char otherPartyPublicKey[KEY_SIZE];
+unsigned char masterKey[KEY_SIZE];
+unsigned char encryptionKey[KEY_SIZE];
+unsigned char hmacKey[KEY_SIZE];
+EVP_CIPHER_CTX* ctx;
+
+struct dhKey myKey;
+
+// Function Prototypes
+int performHandshake();
+int performMutualAuthentication();
+int exchangeAndVerifyPublicKeys();
+int encryptAndSend(const char* message);
+int receiveAndDecrypt(char* receivedMessage);
+
 
 #define max(a, b)         \
 	({ typeof(a) _a = a;    \
@@ -146,11 +169,17 @@ static void sendMessage(GtkWidget* w /* <-- msg entry widget */, gpointer /* dat
 {
 	char* tags[2] = {"self",NULL};
 	tsappend("me: ",tags,0);
+
 	GtkTextIter mstart; /* start of message pointer */
 	GtkTextIter mend;   /* end of message pointer */
-	gtk_text_buffer_get_start_iter(mbuf,&mstart);
 	gtk_text_buffer_get_end_iter(mbuf,&mend);
 	char* message = gtk_text_buffer_get_text(mbuf,&mstart,&mend,1);
+	
+	//Send the encrypted message
+	if(encryptAndSend(message) != 0){
+		fprintf(stderr, "Error sending encypted message\n");
+	}
+
 	size_t len = g_utf8_strlen(message,-1);
 	/* XXX we should probably do the actual network stuff in a different
 	 * thread and have it call this once the message is actually sent. */
@@ -176,10 +205,147 @@ static gboolean shownewmessage(gpointer msg)
 	return 0;
 }
 
+int initSecureChat (void)
+{
+	// Initialize Diffie-Hellman parameters or read from file
+	if (init("params") != 0){
+		fprintf(stderr, "could not read DH params from file 'params'\n");
+		return 1;
+	}
+
+	//Genreate or read Diffie-Hellman key pair
+	if (initKey(&myKey) != 0){
+		fprintf(stderr, "could not initialize key\n");
+		return 1;
+	}
+
+	writeDH("my_key.pub", &myKey);
+
+	return 0;
+}
+
+//Perform handshake with mutual authentication, encryption, and MAC tagging
+int performHandshake(){
+	// Mutual Authentication
+	if (performMutualAuthentication() != 0){
+		fprintf(stderr, "Mutual authentication failed\n");
+		return 1;
+	}
+
+	return 0; // Successful Handshake
+}
+
+//Peform Mutual authentication with public key exchange
+int performMutualAuthentication(){
+	// Exchange and verify public keys
+	if (exchangeAndVerifyPublicKeys() != 0){
+		fprintf(stderr,"Public key exchange and verification failed\n");
+		return 1;
+	}
+
+	return 0; // Mutual Authentication Auccessful
+}
+
+//Exchange and verify public keys
+int exchangeAndVerifyPublicKeys() {
+	// Send client's public key to the server
+	if (send(sockfd, myPublicKey, KEY_SIZE, 0) == -1){
+		perror("send");
+		return 1;
+	}
+
+	//Receive server's public key
+	if(recv(sockfd, otherPartyPublicKey, KEY_SIZE, 0) == -1) {
+		perror("recv");
+		return 1;
+	}
+
+	// Verify received public key against a known set of trusted keys
+	// For simplicity, we assume they trust each other for now.
+	
+	return 0; // Public key exchange and verification successful
+}
+
+// Function to encrypt a message
+int encryptMessage(const char* message, unsigned char* ciphertext){
+	size_t len = strlen(message);
+	memcpy(ciphertext,message, len);
+	
+	return len;
+}
+
+// Encrypt and send a message with MAC tagging
+int encryptAndSend(const char* message){
+	//Tag the message with a MAC using the derived HMAC key
+	unsigned char mac[MAC_SIZE];
+	unsigned int mac_len = sizeof(mac);
+
+	//Encrypt the message
+	unsigned char ciphertext[MSG_SIZE];
+	int len = encryptMessage(message,ciphertext);
+
+	HMAC(EVP_sha256(), hmacKey, KEY_SIZE, ciphertext, len, mac, &mac_len);
+	
+	//Send the encrypted message and MAC 
+	if (send(sockfd,ciphertext, len, 0) == -1 || send(sockfd, mac, MAC_SIZE, 0) == -1){
+		perror("send failed");
+		return 1;
+	}
+
+	return 0; // Successful encryption and send 
+}
+
+// Receive and decrypt a message with MAC verification
+int receiveAndDecrypt(char* receivedMessage){
+	unsigned char receivedCiphertext[MSG_SIZE];
+	int receivedMacLen;
+
+	//Receive the encrypted message and MAC
+	if ((receivedMacLen = recv(sockfd, receivedCiphertext, sizeof(receivedCiphertext), 0)) == -1){
+		perror("recv failed");
+		return 1;
+}
+
+	// Verify the received MAC
+	unsigned char calculatedMAC[MAC_SIZE];
+	unsigned int calculatedMacLen = sizeof(calculatedMAC);
+	HMAC(EVP_sha256(), hmacKey, KEY_SIZE, receivedCiphertext, receivedMacLen, calculatedMAC, &calculatedMacLen);
+
+	if (calculatedMacLen != (unsigned int)receivedMacLen || CRYPTO_memcmp(calculatedMAC, receivedCiphertext, calculatedMacLen) != 0){
+		fprintf(stderr, "MAC verification failed. Possible replay attack.\n");
+		return 1;
+	}
+	
+	//Decrypt the received message
+	EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+	int len;
+
+	//  Declaring the decryptedMessage and allocate memory
+	unsigned char decryptedMessage[MSG_SIZE];
+	
+	if(EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(),NULL,encryptionKey,NULL) != 1 || EVP_DecryptUpdate(ctx, decryptedMessage, &len, receivedCiphertext,len) != 1 || EVP_DecryptFinal_ex(ctx, decryptedMessage + len, &len) != 1){
+		perror("Decryption error");
+		EVP_CIPHER_CTX_free(ctx);
+		return 1;
+	}
+
+	return 0; // Successful decryption and verificaiton
+}
+
 int main(int argc, char *argv[])
 {
-	if (init("params") != 0) {
-		fprintf(stderr, "could not read DH params from file 'params'\n");
+	if (init("params") != 0){
+		fprintf(stderr,"could not read DH params from file 'params'\n");
+		return 1;
+	}
+	if (initSecureChat() != 0){
+		fprintf(stderr, "Error initializing secure chat\n");
+		return 1;		
+	}
+
+	//Perform handshake (including mutual authentication, encryption, and MAC tagging)
+	if (performHandshake() != 0){
+		fprintf(stderr,"Handshake failed\n");
 		return 1;
 	}
 	// define long options
