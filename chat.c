@@ -42,7 +42,7 @@ int performHandshake();
 int performMutualAuthentication();
 int exchangeAndVerifyPublicKeys();
 int encryptAndSend(const char* message);
-int receiveAndDecrypt(char* receivedMessage);
+int receiveAndDecrypt(void);
 
 
 #define max(a, b)         \
@@ -296,8 +296,8 @@ int encryptAndSend(const char* message){
 }
 
 // Receive and decrypt a message with MAC verification
-int receiveAndDecrypt(char* receivedMessage){
-	unsigned char receivedCiphertext[MSG_SIZE];
+int receiveAndDecrypt(void){
+	unsigned char* receivedCiphertext[MSG_SIZE];
 	int receivedMacLen;
 
 	//Receive the encrypted message and MAC
@@ -309,7 +309,7 @@ int receiveAndDecrypt(char* receivedMessage){
 	// Verify the received MAC
 	unsigned char calculatedMAC[MAC_SIZE];
 	unsigned int calculatedMacLen = sizeof(calculatedMAC);
-	HMAC(EVP_sha256(), hmacKey, KEY_SIZE, receivedCiphertext, receivedMacLen, calculatedMAC, &calculatedMacLen);
+	HMAC(EVP_sha256(), hmacKey, KEY_SIZE, (unsigned char *)receivedCiphertext, receivedMacLen, calculatedMAC, (unsigned int *)&calculatedMacLen);
 
 	if (calculatedMacLen != (unsigned int)receivedMacLen || CRYPTO_memcmp(calculatedMAC, receivedCiphertext, calculatedMacLen) != 0){
 		fprintf(stderr, "MAC verification failed. Possible replay attack.\n");
@@ -323,7 +323,7 @@ int receiveAndDecrypt(char* receivedMessage){
 	//  Declaring the decryptedMessage and allocate memory
 	unsigned char decryptedMessage[MSG_SIZE];
 	
-	if(EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(),NULL,encryptionKey,NULL) != 1 || EVP_DecryptUpdate(ctx, decryptedMessage, &len, receivedCiphertext,len) != 1 || EVP_DecryptFinal_ex(ctx, decryptedMessage + len, &len) != 1){
+	if(EVP_DecryptUpdate(ctx, (unsigned char *)decryptedMessage, &len, (unsigned char *)receivedCiphertext, len) != 1 || EVP_DecryptFinal_ex(ctx, (unsigned char *)decryptedMessage + len, &len) != 1){
 		perror("Decryption error");
 		EVP_CIPHER_CTX_free(ctx);
 		return 1;
