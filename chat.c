@@ -1,3 +1,4 @@
+/* Run the works with gcc -o chat chat.c dh.c keys.c -Wall -Wextra -g -pthread -lgmp -lssl -lcrypto $(pkg-config --cflags --libs gtk+-3.0) */
 #include <gtk/gtk.h>
 #include <glib/gunicode.h> /* for utf8 strlen */
 #include <sys/socket.h>
