@@ -1,4 +1,3 @@
-/* Run the works with gcc -o chat chat.c dh.c keys.c -Wall -Wextra -g -pthread -lgmp -lssl -lcrypto $(pkg-config --cflags --libs gtk+-3.0) */
 #include <gtk/gtk.h>
 #include <glib/gunicode.h> /* for utf8 strlen */
 #include <sys/socket.h>
@@ -30,18 +29,14 @@ void* recvMsg(void*);	    /* for trecv */
 
 unsigned char myPrivateKey[KEY_SIZE];
 unsigned char myPublicKey[KEY_SIZE];
-unsigned char otherPartyPublicKey[KEY_SIZE];
-unsigned char masterKey[KEY_SIZE];
-unsigned char encryptionKey[KEY_SIZE];
+unsigned char otherPublicKey[KEY_SIZE];
 unsigned char hmacKey[KEY_SIZE];
 EVP_CIPHER_CTX* ctx;
 
-struct dhKey myKey;
+struct dhKey myKey, yourKey;
 
 // Function Prototypes
 int performHandshake();
-int performMutualAuthentication();
-int exchangeAndVerifyPublicKeys();
 int encryptAndSend(const char* message);
 int receiveAndDecrypt(void);
 
@@ -93,10 +88,13 @@ int initServerNet(int port)
 static int initClientNet(char* hostname, int port)
 {
 	struct sockaddr_in serv_addr;
+	int sockfd;
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	struct hostent *server;
-	if (sockfd < 0)
+	if (sockfd < 0){
 		error("ERROR opening socket");
+		return -1;
+	}
 	server = gethostbyname(hostname);
 	if (server == NULL) {
 		fprintf(stderr,"ERROR, no such host\n");
@@ -108,8 +106,9 @@ static int initClientNet(char* hostname, int port)
 	serv_addr.sin_port = htons(port);
 	if (connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr)) < 0)
 		error("ERROR connecting");
-	/* at this point, should be able to send/recv on sockfd */
-	return 0;
+	/* at this point, should be able to send/recv on sockfd*/
+
+    	return 0; // Return the socket descriptor
 }
 
 static int shutdownNetwork()
@@ -206,74 +205,29 @@ static gboolean shownewmessage(gpointer msg)
 	return 0;
 }
 
-int initSecureChat (void)
-{
-	// Initialize Diffie-Hellman parameters or read from file
-	if (init("params") != 0){
-		fprintf(stderr, "could not read DH params from file 'params'\n");
-		return 1;
-	}
-
-	//Genreate or read Diffie-Hellman key pair
-	if (initKey(&myKey) != 0){
-		fprintf(stderr, "could not initialize key\n");
-		return 1;
-	}
-
-	writeDH("my_key.pub", &myKey);
-
-	return 0;
-}
-
 //Perform handshake with mutual authentication, encryption, and MAC tagging
 int performHandshake(){
-	// Mutual Authentication
-	if (performMutualAuthentication() != 0){
-		fprintf(stderr, "Mutual authentication failed\n");
-		return 1;
-	}
-
-	return 0; // Successful Handshake
-}
-
-//Peform Mutual authentication with public key exchange
-int performMutualAuthentication(){
-	// Exchange and verify public keys
-	if (exchangeAndVerifyPublicKeys() != 0){
-		fprintf(stderr,"Public key exchange and verification failed\n");
-		return 1;
-	}
-
-	return 0; // Mutual Authentication Auccessful
-}
-
-//Exchange and verify public keys
-int exchangeAndVerifyPublicKeys() {
-	// Send client's public key to the server
+    initKey(&myKey);
+    initKey(&yourKey);
+    
+    // Mutual Authentication
+    // Send client's public key to the server
 	if (send(sockfd, myPublicKey, KEY_SIZE, 0) == -1){
 		perror("send");
 		return 1;
 	}
-
+	
 	//Receive server's public key
-	if(recv(sockfd, otherPartyPublicKey, KEY_SIZE, 0) == -1) {
+	if(recv(sockfd, otherPublicKey, KEY_SIZE, 0) == -1) {
 		perror("recv");
 		return 1;
 	}
 
-	// Verify received public key against a known set of trusted keys
-	// For simplicity, we assume they trust each other for now.
+	// Verify received public key against a known set of trusted keys. For simplicity, we assume they trust each other for now
 	
-	return 0; // Public key exchange and verification successful
+	return 0; // Successful Handshake
 }
 
-// Function to encrypt a message
-int encryptMessage(const char* message, unsigned char* ciphertext){
-	size_t len = strlen(message);
-	memcpy(ciphertext,message, len);
-	
-	return len;
-}
 
 // Encrypt and send a message with MAC tagging
 int encryptAndSend(const char* message){
@@ -283,7 +237,9 @@ int encryptAndSend(const char* message){
 
 	//Encrypt the message
 	unsigned char ciphertext[MSG_SIZE];
-	int len = encryptMessage(message,ciphertext);
+	size_t lenmsg = strlen(message);
+	memcpy(ciphertext,message,lenmsg);
+	int len = (int)lenmsg;
 
 	HMAC(EVP_sha256(), hmacKey, KEY_SIZE, ciphertext, len, mac, &mac_len);
 	
@@ -339,11 +295,6 @@ int main(int argc, char *argv[])
 		fprintf(stderr,"could not read DH params from file 'params'\n");
 		return 1;
 	}
-	if (initSecureChat() != 0){
-		fprintf(stderr, "Error initializing secure chat\n");
-		return 1;		
-	}
-
 	//Perform handshake (including mutual authentication, encryption, and MAC tagging)
 	if (performHandshake() != 0){
 		fprintf(stderr,"Handshake failed\n");
@@ -448,6 +399,8 @@ void* recvMsg(void*)
 	size_t maxlen = 512;
 	char msg[maxlen+2]; /* might add \n and \0 */
 	ssize_t nbytes;
+	performHandshake();
+	receiveAndDecrypt();
 	while (1) {
 		if ((nbytes = recv(sockfd,msg,maxlen,0)) == -1)
 			error("recv failed");
